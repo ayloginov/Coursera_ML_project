@@ -1,0 +1,167 @@
+---
+title: "Building a predictive model for movement recognition"
+author: "ayloginov"
+date: "October 8, 2017"
+geometry: margin=1.2cm
+output: 
+  html_document: 
+    keep_md: yes
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Overview
+
+In this document we will describe the process of creating a classification model for predicting the type of body movement using the data from accelerometers on the belt, forearm, arm, and dumbell of 6 subjects. 
+
+The data comes from this source:
+http://web.archive.org/web/20161224072740/http:/groupware.les.inf.puc-rio.br/har
+
+
+## Exploring and cleaning data
+
+```{r}
+library(ggplot2)
+library(caret)
+```
+
+```{r, cache=TRUE}
+training_data <- read.csv("pml-training.csv", stringsAsFactors=FALSE)
+colnames(training_data)
+```
+The dataset consists of 19,622 observations of 160 variables. We need to determine which variables may be used for the prediction model.
+
+The first several variables represent the index, names of subjects and timestamps which should not be useful for our analysis. The variables containing "window" represent time intervals for which other variables are recorded and/or averaged. There is a clear pattern for `classe` variable depending on `X` and `num_window`.
+
+```{r}
+ggplot(training_data, aes(X, num_window)) + 
+    geom_point(aes(color=factor(classe)))
+```
+
+However, we cannot be sure that similar relation will exist in a different setting, e.g. for a new sequence of exercises or a different indexing in another dataset that we will need to make our prediction for. So, in our model we will not use the variables from 1 to 7. 
+
+```{r}
+training_data <- training_data[, 8:160]
+```
+
+Next, we need to check if the variables have enough observations in order to include them into our model. We will check for NA values and empty ("") values.
+
+It appears that there are a lot of variables that contain mostly empty or NA observations. These variables generally represent different aggregations of the sensors' data that is recorded in other variables. So, since these variables are derived from other parameters, and also they mainly include NA or empty values, we will exclude them from our model. 
+
+
+```{r, cache=TRUE}
+# check for NA values and exclude columns with NAs 
+na_count <-sapply(training_data, function(y) sum(is.na(y)))
+na_count <- data.frame(na_count)
+na_count
+training_data <- training_data[, c(which(na_count$na_count == 0))]
+```
+
+```{r, cache=TRUE}
+# check for empty values and exclude columns with empty values
+empty_count <-sapply(training_data, function(y) sum((y)== ""))
+empty_count <- data.frame(empty_count)
+empty_count
+training_data <- training_data[, c(which(empty_count$empty_count == 0))]
+```
+
+
+```{r}
+
+colnames(training_data)
+```
+
+We are finally left with 52 variables that represent sensors' data and the `class` of movement that we will need to predict. 
+
+We can look at how some of the variables relate to `class`.
+
+```{r}
+ggplot(training_data, aes(total_accel_belt, total_accel_forearm)) + 
+    geom_point(aes(color=factor(classe))) +
+    ggtitle("Total acceleration belt vs. Total acceleration forearm")
+
+ggplot(training_data, aes(roll_belt, yaw_belt)) + 
+    geom_point(aes(color=factor(classe))) +
+    ggtitle("Roll belt vs. Yaw belt")
+```
+
+There is clearly some pattern in the data that should be detected by classification algorithms.
+
+## Building and training the prediction model
+
+We will use two algorithms that are generally known as accurate in classification tasks - boosting and random forest. We will then combine their results to check if the combined result can improve the performance of the model.
+
+We will start by deviding out dataset into training and testing subsets in order to perform crossvalidation. We will use 70% of our data for the training set and 30% for the test set.
+
+```{r, cache=TRUE}
+set.seed(1234)
+inTrain <- createDataPartition(training_data$classe, p=0.7, list = FALSE)
+training <- training_data[inTrain, ]
+testing <- training_data[-inTrain, ]
+```
+
+Then we will try the boosting algorithm.
+
+```{r, cache=TRUE, results='hide'}
+model_gbm <- train(classe ~ ., method ="gbm", data = training)
+```
+
+```{r, cache=TRUE}
+gbm_predict <- predict(model_gbm, newdata = testing)
+confusionMatrix(gbm_predict, testing$classe)
+```
+
+The accuracy we get is 96.2%.
+
+Let's see if we can get a more accurate model with random forest.
+
+
+```{r, cache=TRUE, results='hide'}
+model_rf <- train(classe ~ ., method="rf", data=training)
+```
+
+
+```{r, cache=TRUE}
+rf_predict <- predict(model_rf, newdata = testing)
+confusionMatrix(rf_predict, testing$classe)
+```
+
+This gives a greater accuracy of 99.46%
+
+Now let's try to combine the two algorithms and see if this gives us any further improvement in accuracy.
+
+```{r, cache=TRUE}
+combined_data <- data.frame(rf_predict, gbm_predict, classe=testing$classe)
+model_combined <- train(classe ~ ., method="rf", data = combined_data)
+
+combined_predict <- predict(model_combined, combined_data)
+confusionMatrix(combined_predict, testing$classe) 
+```
+
+There is no further increase in accuracy from combining the algorithms, so for our final prediction we will use the random forest model which has the best accuracy in our case.
+
+
+```{r, cache=TRUE}
+test_data <- read.csv("pml-testing.csv", stringsAsFactors=FALSE)
+```
+
+The test data is similar to the original training dataset, with the `classe` variable replaced with `problem_id` variable which we need to predict the class for.
+
+Let's run our random forest model to get the predicted classes
+
+```{r}
+predict_testdata<-predict(model_rf, newdata = test_data[,-which(names(test_data) %in% "problem_id")])
+result <- data.frame(problem_id = test_data$problem_id, prediction = predict_testdata)
+
+result
+```
+
+In conclusion let's look which variables contribute the most to the prediction model.
+
+```{r}
+top_variables <- varImp(model_rf)
+plot(top_variables, main = "Most important variables", top = 10)
+```
+
